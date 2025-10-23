@@ -1,0 +1,67 @@
+# ---- Secrets (never commit) ----
+.env
+.env.*
+*.env
+.streamlit/secrets.toml
+secrets.*
+*credentials*.json
+*key*.json
+*.pem
+*.p12
+*.crt
+
+# ---- Streamlit local config ----
+# Keep theme/config in Git, ignore the rest (incl. secrets/logs)
+.streamlit/*
+!.streamlit/config.toml
+!.streamlit/config.yaml
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# ---- Virtual envs & build artifacts ----
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# ---- Notebooks & tests ----
+.ipynb_checkpoints/
+pytest_cache/
+.coverage
+htmlcov/
+
+# ---- Editor/OS ----
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# ---- Logs & caches ----
+logs/
+*.log
+.cache/
+
+# ---- (Optional) local data/models — ignore if hosted elsewhere ----
+# # Remove these lines if you intend to ship small assets in the repo.
+# data/
+# *.csv
+# *.parquet
+# *.db
+# *.sqlite
+# models/
+# *.pt
+# *.bin
+# *.ckpt
+# *.onnx
+# *.h5
+# *.tflite
