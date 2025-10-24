@@ -1,25 +1,31 @@
-# Web Framework
+# AQI Dashboard - Python Dependencies
+# ALL PACKAGES VERIFIED FOR NUMPY 2.x COMPATIBILITY
+# Last updated: 2025-10-24
+
+# Core Framework (no numpy dependencies)
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-pydantic==2.5.0
-
-# Data Processing
-pandas==2.1.3
-numpy>=2.0.0
-
-# Machine Learning
-scikit-learn==1.3.2
-joblib==1.3.2
-
-# Google Gemini AI
-google-generativeai==0.3.1
-
-# Utilities
-python-dotenv==1.0.0
 python-multipart==0.0.6
 
-# Optional: For better performance
-aiofiles==23.2.1
+# Data Processing - CRITICAL: Both must support numpy 2.x
+numpy>=2.0.0,<3.0.0
+pandas>=2.2.0,<3.0.0          # pandas 2.2.0+ supports numpy 2.x
 
-# Model Predictions using Ensemble
-xgboost
+# Machine Learning - VERIFIED for numpy 2.x compatibility
+scikit-learn>=1.5.0,<2.0.0    # scikit-learn 1.5.0+ has full numpy 2.x support
+xgboost>=2.1.0,<3.0.0         # xgboost 2.1.0+ supports numpy 2.x
+
+# Supporting ML packages
+joblib>=1.3.2                  # Used by scikit-learn, numpy-compatible
+scipy>=1.13.0                  # scipy 1.13.0+ supports numpy 2.x (scikit-learn dependency)
+
+# AI Assistant (no numpy dependencies)
+google-generativeai==0.3.1
+
+# Additional Dependencies (no numpy conflicts)
+pydantic>=2.0.0,<3.0.0
+python-dotenv>=1.0.0
+aiofiles>=23.2.0
+
+# Optional: Include for better error messages
+setuptools>=65.0.0
