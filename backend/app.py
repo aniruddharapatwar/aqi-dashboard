@@ -1,7 +1,7 @@
 """
-AQI Dashboard - FastAPI Backend (RAILWAY DEPLOYMENT VERSION)
+AQI Dashboard - FastAPI Backend (RAILWAY - MODEL NAMING FIX)
 Complete REST API for air quality predictions and AI assistance
-Fixed for Railway deployment with correct response formats
+Fixed to match actual model file naming: model_artifacts_{POLLUTANT}_{HORIZON}.pkl
 """
 
 from fastapi import FastAPI, HTTPException, Request
@@ -196,7 +196,7 @@ class DataManager:
         return sorted(locations)
     
     def get_location_data(self, location_name):
-        """Get current and historical data for a location"""
+        """Get current and historical data for a location - WITH BETTER ERROR HANDLING"""
         if location_name not in self.whitelist:
             raise ValueError(f"Location '{location_name}' not found in whitelist")
         
@@ -205,12 +205,28 @@ class DataManager:
         
         logger.info(f"Searching data for {location_name} at ({lat}, {lon})")
         
-        # Get data for this location
-        location_mask = (self.data['lat'] == lat) & (self.data['lon'] == lon)
+        # Get data for this location with tolerance for floating point
+        location_mask = (
+            (self.data['lat'].round(4) == round(lat, 4)) & 
+            (self.data['lon'].round(4) == round(lon, 4))
+        )
         location_data = self.data[location_mask].copy()
         
         if len(location_data) == 0:
-            raise ValueError(f"No data found for location: {location_name}")
+            # Try broader search with tolerance
+            lat_tolerance = 0.01
+            lon_tolerance = 0.01
+            location_mask = (
+                (self.data['lat'] >= lat - lat_tolerance) & 
+                (self.data['lat'] <= lat + lat_tolerance) &
+                (self.data['lon'] >= lon - lon_tolerance) & 
+                (self.data['lon'] <= lon + lon_tolerance)
+            )
+            location_data = self.data[location_mask].copy()
+            
+            if len(location_data) == 0:
+                logger.warning(f"No data found for {location_name} even with tolerance")
+                raise ValueError(f"No data available for location: {location_name}")
         
         # Get most recent data as "current"
         location_data = location_data.sort_values('timestamp')
@@ -224,23 +240,27 @@ class DataManager:
         
         return current, historical
     
-    def load_model(self, pollutant: str):
-        """Load ML model for a specific pollutant"""
-        if pollutant in self.models:
-            return self.models[pollutant]
+    def load_model(self, pollutant: str, horizon: str = '6h'):
+        """Load ML model for a specific pollutant and time horizon - FIXED NAMING"""
+        model_key = f"{pollutant}_{horizon}"
         
-        model_file = Config.MODEL_PATH / f"{pollutant}_random_forest_model.pkl"
+        if model_key in self.models:
+            return self.models[model_key]
+        
+        # NEW: Use actual file naming convention
+        model_file = Config.MODEL_PATH / f"model_artifacts_{pollutant}_{horizon}.pkl"
         
         if not model_file.exists():
+            logger.warning(f"Model not found: {model_file}")
             raise FileNotFoundError(f"Model not found: {model_file}")
         
         try:
             with open(model_file, 'rb') as f:
-                self.models[pollutant] = pickle.load(f)
-            logger.info(f"✓ Loaded model: {pollutant}")
-            return self.models[pollutant]
+                self.models[model_key] = pickle.load(f)
+            logger.info(f"✓ Loaded model: {pollutant}_{horizon}")
+            return self.models[model_key]
         except Exception as e:
-            logger.error(f"Failed to load model {pollutant}: {e}")
+            logger.error(f"Failed to load model {pollutant}_{horizon}: {e}")
             raise
 
 # Initialize global data manager
@@ -316,8 +336,8 @@ class AQICalculator:
         dominant_category = 'Good'
         avg_confidence = 0
         
-        for pollutant, (category, confidence) in predictions.items():
-            aqi_min, aqi_max, aqi_mid = self.calculate_aqi_range(aqi_mid, pollutant, standard)
+        for pollutant, (category, confidence, value) in predictions.items():
+            aqi_min, aqi_max, aqi_mid = self.calculate_aqi_range(value, pollutant, standard)
             
             if aqi_max > max_aqi:
                 max_aqi = aqi_max
@@ -362,18 +382,42 @@ def extract_weather_data(current_data):
     return weather_data
 
 def predict_pollutant(pollutant: str, current_data, historical_data, horizon: str):
-    """Predict a single pollutant for a specific time horizon"""
+    """Predict a single pollutant for a specific time horizon - FIXED MODEL LOADING"""
     try:
-        model = data_manager.load_model(pollutant)
+        # Map horizons to model file names
+        horizon_map = {
+            'current': '6h',  # Use 6h model for current
+            '6h': '6h',
+            '24h': '24h'
+        }
+        
+        model_horizon = horizon_map.get(horizon, '6h')
+        model = data_manager.load_model(pollutant, model_horizon)
         
         # Create features
-        features = current_data[['temp', 'humidity', 'wind_speed', 'wind_dir', 
-                                 'pressure', 'precip', 'vis', 'clouds']].copy()
+        feature_cols = ['temp', 'humidity', 'wind_speed', 'wind_dir', 
+                       'pressure', 'precip', 'vis', 'clouds']
+        
+        # Check if all required features exist
+        missing_cols = [col for col in feature_cols if col not in current_data.columns]
+        if missing_cols:
+            logger.warning(f"Missing features for {pollutant}: {missing_cols}")
+            return {'error': f"Missing features: {missing_cols}"}
+        
+        features = current_data[feature_cols].copy()
+        
+        # Handle any NaN values
+        features = features.fillna(0)
         
         # Make prediction
         prediction = model.predict(features)[0]
-        probabilities = model.predict_proba(features)[0]
-        confidence = float(max(probabilities))
+        
+        # Get confidence if model supports it
+        try:
+            probabilities = model.predict_proba(features)[0]
+            confidence = float(max(probabilities))
+        except:
+            confidence = 0.75  # Default confidence if model doesn't support predict_proba
         
         return {
             'value': float(prediction),
@@ -381,8 +425,11 @@ def predict_pollutant(pollutant: str, current_data, historical_data, horizon: st
             'error': None
         }
     
+    except FileNotFoundError as e:
+        logger.error(f"Model file not found for {pollutant} ({horizon}): {e}")
+        return {'error': f"Model not available: {pollutant}_{horizon}"}
     except Exception as e:
-        logger.error(f"Prediction error for {pollutant}: {e}")
+        logger.error(f"Prediction error for {pollutant} ({horizon}): {e}")
         return {'error': str(e)}
 
 def predict_all(current_data, historical_data, standard: str = 'IN'):
@@ -416,7 +463,7 @@ def predict_all(current_data, historical_data, standard: str = 'IN'):
                 results[pollutant][horizon] = pred
         
         # Calculate overall AQI
-        preds = {p: (results[p][horizon]['category'], results[p][horizon]['confidence'])
+        preds = {p: (results[p][horizon]['category'], results[p][horizon]['confidence'], results[p][horizon]['value'])
                 for p in pollutants if 'error' not in results[p][horizon]}
         
         if preds:
@@ -571,6 +618,14 @@ async def health_basic():
 @app.get("/api/health")
 async def health_check():
     """Detailed health check endpoint"""
+    # Check which models are available
+    available_models = []
+    for pollutant in ['PM25', 'PM10', 'NO2', 'OZONE']:
+        for horizon in ['6h', '24h']:
+            model_file = Config.MODEL_PATH / f"model_artifacts_{pollutant}_{horizon}.pkl"
+            if model_file.exists():
+                available_models.append(f"{pollutant}_{horizon}")
+    
     return {
         "status": "healthy",
         "data_loaded": len(data_manager.data) > 0,
@@ -578,27 +633,29 @@ async def health_check():
         "locations": len(data_manager.whitelist),
         "regions": len(data_manager.get_regions()),
         "gemini_enabled": gemini_assistant.enabled,
-        "models_path_exists": Config.MODEL_PATH.exists()
+        "models_path_exists": Config.MODEL_PATH.exists(),
+        "available_models": available_models,
+        "total_models": len(available_models)
     }
 
 @app.get("/api/regions")
 async def get_regions():
-    """Get all available regions - FIXED to return direct array"""
+    """Get all available regions - Returns direct array"""
     try:
         regions = data_manager.get_regions()
         logger.info(f"Returning {len(regions)} regions")
-        return regions  # Return direct array, not wrapped object
+        return regions  # Return direct array
     except Exception as e:
         logger.error(f"Error getting regions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/locations/{region}")
 async def get_locations(region: str):
-    """Get locations for a specific region - FIXED to return direct array"""
+    """Get locations for a specific region - Returns direct array"""
     try:
         locations = data_manager.get_locations_by_region(region)
         logger.info(f"Returning {len(locations)} locations for region: {region}")
-        return locations  # Return direct array, not wrapped object
+        return locations  # Return direct array
     except Exception as e:
         logger.error(f"Error getting locations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -618,12 +675,20 @@ async def predict_endpoint(request: PredictionRequest):
             )
         
         # Get location data
-        current, historical = data_manager.get_location_data(request.location)
+        try:
+            current, historical = data_manager.get_location_data(request.location)
+        except ValueError as e:
+            # Location exists in whitelist but has no data
+            logger.warning(f"No data for location: {request.location}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"No data available for location '{request.location}'. This location may not have monitoring stations."
+            )
         
         if len(current) == 0:
             raise HTTPException(
                 status_code=404,
-                detail=f"No data available for location: {request.location}"
+                detail=f"No current data available for location: {request.location}"
             )
         
         # Make predictions
@@ -681,6 +746,20 @@ async def startup_event():
     logger.info(f"Locations available: {len(data_manager.whitelist)}")
     logger.info(f"Regions available: {len(data_manager.get_regions())}")
     logger.info(f"Gemini AI: {'✓ Enabled' if gemini_assistant.enabled else '✗ Disabled (Set GEMINI_API_KEY env variable)'}")
+    
+    # Check available models
+    available_models = []
+    for pollutant in ['PM25', 'PM10', 'NO2', 'OZONE']:
+        for horizon in ['6h', '24h']:
+            model_file = Config.MODEL_PATH / f"model_artifacts_{pollutant}_{horizon}.pkl"
+            if model_file.exists():
+                available_models.append(f"{pollutant}_{horizon}")
+    
+    logger.info(f"Available models: {len(available_models)}/8")
+    if len(available_models) < 8:
+        missing = 8 - len(available_models)
+        logger.warning(f"⚠️ Missing {missing} model files - predictions may not work for all pollutants/horizons")
+    
     logger.info(f"Port: {os.environ.get('PORT', '8000')}")
     logger.info("=" * 60)
 
