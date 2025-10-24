@@ -1,7 +1,7 @@
 """
-AQI Dashboard - FastAPI Backend (RAILWAY - MODEL NAMING FIX)
+AQI Dashboard - FastAPI Backend (FINAL FIX - NUMPY + OZONE NAMING)
 Complete REST API for air quality predictions and AI assistance
-Fixed to match actual model file naming: model_artifacts_{POLLUTANT}_{HORIZON}.pkl
+Fixed: OZONE naming (Ozone) and numpy compatibility
 """
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,6 +15,7 @@ from pathlib import Path
 import logging
 import json
 import os
+import sys
 
 # Import Gemini AI with proper error handling
 try:
@@ -26,6 +27,10 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Log numpy version for debugging
+logger.info(f"NumPy version: {np.__version__}")
+logger.info(f"Python version: {sys.version}")
 
 # ============================================================================
 # CONFIGURATION
@@ -241,14 +246,16 @@ class DataManager:
         return current, historical
     
     def load_model(self, pollutant: str, horizon: str = '6h'):
-        """Load ML model for a specific pollutant and time horizon - FIXED NAMING"""
+        """Load ML model - FIXED: OZONE naming and numpy compatibility"""
         model_key = f"{pollutant}_{horizon}"
         
         if model_key in self.models:
             return self.models[model_key]
         
-        # NEW: Use actual file naming convention
-        model_file = Config.MODEL_PATH / f"model_artifacts_{pollutant}_{horizon}.pkl"
+        # FIXED: Handle OZONE vs Ozone naming
+        # Your files use "Ozone" (capital O, then lowercase)
+        file_pollutant = "Ozone" if pollutant == "OZONE" else pollutant
+        model_file = Config.MODEL_PATH / f"model_artifacts_{file_pollutant}_{horizon}.pkl"
         
         if not model_file.exists():
             logger.warning(f"Model not found: {model_file}")
@@ -256,9 +263,15 @@ class DataManager:
         
         try:
             with open(model_file, 'rb') as f:
+                # Load with explicit encoding for numpy compatibility
                 self.models[model_key] = pickle.load(f)
             logger.info(f"✓ Loaded model: {pollutant}_{horizon}")
             return self.models[model_key]
+        except ModuleNotFoundError as e:
+            if 'numpy._core' in str(e):
+                logger.error(f"NumPy version mismatch for {pollutant}_{horizon}. Models need numpy>=2.0")
+                raise Exception(f"NumPy compatibility error: {e}")
+            raise
         except Exception as e:
             logger.error(f"Failed to load model {pollutant}_{horizon}: {e}")
             raise
@@ -382,7 +395,7 @@ def extract_weather_data(current_data):
     return weather_data
 
 def predict_pollutant(pollutant: str, current_data, historical_data, horizon: str):
-    """Predict a single pollutant for a specific time horizon - FIXED MODEL LOADING"""
+    """Predict a single pollutant for a specific time horizon"""
     try:
         # Map horizons to model file names
         horizon_map = {
@@ -601,6 +614,7 @@ async def root():
         "message": "AQI Dashboard API",
         "version": "1.0.0",
         "status": "running",
+        "numpy_version": np.__version__,
         "endpoints": {
             "docs": "/docs",
             "health": "/api/health",
@@ -613,7 +627,7 @@ async def root():
 @app.get("/health")
 async def health_basic():
     """Basic health check"""
-    return {"status": "ok"}
+    return {"status": "ok", "numpy_version": np.__version__}
 
 @app.get("/api/health")
 async def health_check():
@@ -622,7 +636,9 @@ async def health_check():
     available_models = []
     for pollutant in ['PM25', 'PM10', 'NO2', 'OZONE']:
         for horizon in ['6h', '24h']:
-            model_file = Config.MODEL_PATH / f"model_artifacts_{pollutant}_{horizon}.pkl"
+            # Use correct naming for OZONE
+            file_pollutant = "Ozone" if pollutant == "OZONE" else pollutant
+            model_file = Config.MODEL_PATH / f"model_artifacts_{file_pollutant}_{horizon}.pkl"
             if model_file.exists():
                 available_models.append(f"{pollutant}_{horizon}")
     
@@ -635,7 +651,9 @@ async def health_check():
         "gemini_enabled": gemini_assistant.enabled,
         "models_path_exists": Config.MODEL_PATH.exists(),
         "available_models": available_models,
-        "total_models": len(available_models)
+        "total_models": len(available_models),
+        "numpy_version": np.__version__,
+        "python_version": sys.version
     }
 
 @app.get("/api/regions")
@@ -742,6 +760,8 @@ async def startup_event():
     """Log startup information"""
     logger.info("=" * 60)
     logger.info("AQI Dashboard API Starting on Railway...")
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"NumPy version: {np.__version__}")
     logger.info(f"Data loaded: {len(data_manager.data)} rows")
     logger.info(f"Locations available: {len(data_manager.whitelist)}")
     logger.info(f"Regions available: {len(data_manager.get_regions())}")
@@ -751,7 +771,9 @@ async def startup_event():
     available_models = []
     for pollutant in ['PM25', 'PM10', 'NO2', 'OZONE']:
         for horizon in ['6h', '24h']:
-            model_file = Config.MODEL_PATH / f"model_artifacts_{pollutant}_{horizon}.pkl"
+            # Use correct naming for OZONE
+            file_pollutant = "Ozone" if pollutant == "OZONE" else pollutant
+            model_file = Config.MODEL_PATH / f"model_artifacts_{file_pollutant}_{horizon}.pkl"
             if model_file.exists():
                 available_models.append(f"{pollutant}_{horizon}")
     
