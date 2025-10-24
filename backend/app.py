@@ -1,7 +1,7 @@
 """
-AQI Dashboard - FastAPI Backend (FINAL FIX - NUMPY + OZONE NAMING)
+AQI Dashboard - FastAPI Backend (FIXED - Model Loading)
 Complete REST API for air quality predictions and AI assistance
-Fixed: OZONE naming (Ozone) and numpy compatibility
+Fixed: Model artifact dictionary handling
 """
 
 from fastapi import FastAPI, HTTPException, Request
@@ -16,6 +16,7 @@ import logging
 import json
 import os
 import sys
+import traceback
 
 # Import Gemini AI with proper error handling
 try:
@@ -201,7 +202,7 @@ class DataManager:
         return sorted(locations)
     
     def get_location_data(self, location_name):
-        """Get current and historical data for a location - WITH BETTER ERROR HANDLING"""
+        """Get current and historical data for a location"""
         if location_name not in self.whitelist:
             raise ValueError(f"Location '{location_name}' not found in whitelist")
         
@@ -246,14 +247,13 @@ class DataManager:
         return current, historical
     
     def load_model(self, pollutant: str, horizon: str = '6h'):
-        """Load ML model - FIXED: OZONE naming and numpy compatibility"""
+        """Load ML model - FIXED: Handle dict artifacts properly"""
         model_key = f"{pollutant}_{horizon}"
         
         if model_key in self.models:
             return self.models[model_key]
         
         # FIXED: Handle OZONE vs Ozone naming
-        # Your files use "Ozone" (capital O, then lowercase)
         file_pollutant = "Ozone" if pollutant == "OZONE" else pollutant
         model_file = Config.MODEL_PATH / f"model_artifacts_{file_pollutant}_{horizon}.pkl"
         
@@ -263,17 +263,52 @@ class DataManager:
         
         try:
             with open(model_file, 'rb') as f:
-                # Load with explicit encoding for numpy compatibility
-                self.models[model_key] = pickle.load(f)
+                artifacts = pickle.load(f)
+            
+            # FIXED: Extract the actual model from the artifacts dictionary
+            if isinstance(artifacts, dict):
+                # Try common keys for the model object
+                if 'model' in artifacts:
+                    model = artifacts['model']
+                elif 'classifier' in artifacts:
+                    model = artifacts['classifier']
+                elif 'regressor' in artifacts:
+                    model = artifacts['regressor']
+                else:
+                    # Try to find the first object with predict method
+                    model = None
+                    for key, value in artifacts.items():
+                        if hasattr(value, 'predict'):
+                            model = value
+                            logger.info(f"Found model in key '{key}' for {model_key}")
+                            break
+                    
+                    if model is None:
+                        raise ValueError(f"No model found in artifacts for {model_key}. Keys: {list(artifacts.keys())}")
+                
+                # Store both the model and the full artifacts
+                self.models[model_key] = {
+                    'model': model,
+                    'artifacts': artifacts
+                }
+            else:
+                # If it's not a dict, assume it's the model itself
+                self.models[model_key] = {
+                    'model': artifacts,
+                    'artifacts': {'model': artifacts}
+                }
+            
             logger.info(f"✓ Loaded model: {pollutant}_{horizon}")
             return self.models[model_key]
+            
         except ModuleNotFoundError as e:
             if 'numpy._core' in str(e):
-                logger.error(f"NumPy version mismatch for {pollutant}_{horizon}. Models need numpy>=2.0")
+                logger.error(f"NumPy version mismatch for {pollutant}_{horizon}")
                 raise Exception(f"NumPy compatibility error: {e}")
             raise
         except Exception as e:
             logger.error(f"Failed to load model {pollutant}_{horizon}: {e}")
+            logger.error(traceback.format_exc())
             raise
 
 # Initialize global data manager
@@ -375,13 +410,12 @@ class AQICalculator:
 aqi_calculator = AQICalculator()
 
 def extract_weather_data(current_data):
-    """Extract real weather data from current observation using actual column names"""
+    """Extract real weather data from current observation"""
     if len(current_data) == 0:
         return {}
     
     row = current_data.iloc[0]
     
-    # Use actual column names from the data file
     weather_data = {
         'temperature': float(row.get('temperature', 0)) if pd.notna(row.get('temperature')) else None,
         'humidity': float(row.get('humidity', 0)) if pd.notna(row.get('humidity')) else None,
@@ -398,44 +432,42 @@ def extract_weather_data(current_data):
     return weather_data
 
 def predict_pollutant(pollutant: str, current_data, historical_data, horizon: str):
-    """Predict a single pollutant for a specific time horizon - FIXED COLUMN MAPPING"""
+    """Predict a single pollutant for a specific time horizon - FIXED"""
     try:
-        # Map horizons to model file names
         horizon_map = {
-            'current': '6h',  # Use 6h model for current
+            'current': '6h',
             '6h': '6h',
             '24h': '24h'
         }
         
         model_horizon = horizon_map.get(horizon, '6h')
-        model = data_manager.load_model(pollutant, model_horizon)
+        model_artifacts = data_manager.load_model(pollutant, model_horizon)
+        
+        # FIXED: Extract the actual model object
+        model = model_artifacts['model']
+        artifacts = model_artifacts['artifacts']
         
         # Create features DataFrame with proper column mapping
-        # Your data has camelCase columns, models expect snake_case
         features = pd.DataFrame()
         
-        # Map columns from your inference data to model expected names
         column_map = {
             'temperature': 'temp',
-            'humidity': 'humidity',  # Same name
+            'humidity': 'humidity',
             'windSpeed': 'wind_speed',
             'windBearing': 'wind_dir',
-            'pressure': 'pressure',  # Same name
+            'pressure': 'pressure',
             'precipIntensity': 'precip',
             'cloudCover': 'clouds'
         }
         
-        # Apply mapping
         for data_col, model_col in column_map.items():
             if data_col in current_data.columns:
                 features[model_col] = current_data[data_col]
             else:
-                # Column missing, fill with 0
                 features[model_col] = 0
-                logger.warning(f"Column '{data_col}' not found in data for {pollutant}, using 0")
+                logger.warning(f"Column '{data_col}' not found, using 0")
         
-        # Add 'vis' (visibility) - not in your data, use default
-        features['vis'] = 10.0  # Default visibility in km
+        features['vis'] = 10.0  # Default visibility
         
         # Ensure all required features exist
         required_features = ['temp', 'humidity', 'wind_speed', 'wind_dir', 
@@ -444,23 +476,29 @@ def predict_pollutant(pollutant: str, current_data, historical_data, horizon: st
         for col in required_features:
             if col not in features.columns:
                 features[col] = 0
-                logger.warning(f"Feature '{col}' added with default value 0")
         
-        # Select features in correct order
-        features = features[required_features]
+        features = features[required_features].fillna(0)
         
-        # Handle any NaN values
-        features = features.fillna(0)
+        # Apply scaler if available
+        if 'scaler' in artifacts and artifacts['scaler'] is not None:
+            try:
+                features_scaled = artifacts['scaler'].transform(features)
+                features = pd.DataFrame(
+                    features_scaled,
+                    columns=features.columns
+                )
+            except Exception as e:
+                logger.warning(f"Could not apply scaler for {pollutant}: {e}")
         
         # Make prediction
         prediction = model.predict(features)[0]
         
-        # Get confidence if model supports it
+        # Get confidence
         try:
             probabilities = model.predict_proba(features)[0]
             confidence = float(max(probabilities))
         except:
-            confidence = 0.75  # Default confidence if model doesn't support predict_proba
+            confidence = 0.75
         
         return {
             'value': float(prediction),
@@ -473,6 +511,7 @@ def predict_pollutant(pollutant: str, current_data, historical_data, horizon: st
         return {'error': f"Model not available: {pollutant}_{horizon}"}
     except Exception as e:
         logger.error(f"Prediction error for {pollutant} ({horizon}): {e}")
+        logger.error(traceback.format_exc())
         return {'error': str(e)}
 
 def predict_all(current_data, historical_data, standard: str = 'IN'):
@@ -546,11 +585,9 @@ class GeminiAssistant:
             }
         
         try:
-            # Extract user profile information
             profile_type = user_profile.get('profile_type', '')
             profile_label = user_profile.get('profile_label', 'general public')
             
-            # Build profile context
             profile_context = ""
             if profile_type:
                 profile_guidance = {
@@ -613,7 +650,6 @@ Provide your response:"""
         
         response = base_responses.get(category, "How can I help you with air quality information?")
         
-        # Add profile-specific advice
         if user_profile:
             profile_type = user_profile.get('profile_type', '')
             profile_advice = {
@@ -666,7 +702,6 @@ async def health_check():
     available_models = []
     for pollutant in ['PM25', 'PM10', 'NO2', 'OZONE']:
         for horizon in ['6h', '24h']:
-            # Use correct naming for OZONE
             file_pollutant = "Ozone" if pollutant == "OZONE" else pollutant
             model_file = Config.MODEL_PATH / f"model_artifacts_{file_pollutant}_{horizon}.pkl"
             if model_file.exists():
@@ -692,7 +727,7 @@ async def get_regions():
     try:
         regions = data_manager.get_regions()
         logger.info(f"Returning {len(regions)} regions")
-        return regions  # Return direct array
+        return regions
     except Exception as e:
         logger.error(f"Error getting regions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -703,7 +738,7 @@ async def get_locations(region: str):
     try:
         locations = data_manager.get_locations_by_region(region)
         logger.info(f"Returning {len(locations)} locations for region: {region}")
-        return locations  # Return direct array
+        return locations
     except Exception as e:
         logger.error(f"Error getting locations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -726,7 +761,6 @@ async def predict_endpoint(request: PredictionRequest):
         try:
             current, historical = data_manager.get_location_data(request.location)
         except ValueError as e:
-            # Location exists in whitelist but has no data
             logger.warning(f"No data for location: {request.location}")
             raise HTTPException(
                 status_code=404,
@@ -801,7 +835,6 @@ async def startup_event():
     available_models = []
     for pollutant in ['PM25', 'PM10', 'NO2', 'OZONE']:
         for horizon in ['6h', '24h']:
-            # Use correct naming for OZONE
             file_pollutant = "Ozone" if pollutant == "OZONE" else pollutant
             model_file = Config.MODEL_PATH / f"model_artifacts_{file_pollutant}_{horizon}.pkl"
             if model_file.exists():
