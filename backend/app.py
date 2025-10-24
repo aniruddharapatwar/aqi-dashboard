@@ -1,6 +1,7 @@
 """
-AQI Dashboard - FastAPI Backend (RAILWAY PRODUCTION VERSION)
-Complete REST API for air quality predictions with real weather data
+AQI Dashboard - FastAPI Backend (RAILWAY DEPLOYMENT VERSION)
+Complete REST API for air quality predictions and AI assistance
+Fixed for Railway deployment with correct response formats
 """
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,12 +16,13 @@ import logging
 import json
 import os
 
-# Import Gemini AI
+# Import Gemini AI with proper error handling
 try:
     import google.generativeai as genai
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
+    logging.warning("google-generativeai not installed. Install with: pip install google-generativeai")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,6 +36,8 @@ class Config:
     MODEL_PATH = BASE_DIR / "Classification_trained_models"
     DATA_PATH = BASE_DIR / "data" / "inference_data.csv"
     WHITELIST_PATH = BASE_DIR / "region_wise_popular_places_from_inference.csv"
+    
+    # Railway uses environment variables, not Streamlit secrets
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     
     AQI_COLORS_IN = {
@@ -72,17 +76,17 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS middleware - Allow all origins for now, update with Vercel domain later
+# CORS middleware - Allow all origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Update with your Vercel domain: ["https://your-app.vercel.app"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ============================================================================
-# DATA MANAGER
+# DATA MANAGER - FIXED VERSION
 # ============================================================================
 
 class DataManager:
@@ -96,7 +100,7 @@ class DataManager:
         try:
             if not os.path.exists(Config.DATA_PATH):
                 logger.warning(f"Data file not found: {Config.DATA_PATH}")
-                return pd.DataFrame(columns=['lat', 'lon', 'timestamp'])
+                return pd.DataFrame(columns=['lat', 'lon', 'timestamp', 'location'])
             
             logger.info(f"Loading data from: {Config.DATA_PATH}")
             df = pd.read_csv(Config.DATA_PATH)
@@ -107,7 +111,7 @@ class DataManager:
             elif 'timestamp' in df.columns:
                 df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed', errors='coerce')
             else:
-                logger.warning("Data missing date/timestamp column")
+                logger.warning("Data missing date/timestamp column, using current time")
                 df['timestamp'] = pd.Timestamp.now()
             
             # Handle lng -> lon mapping
@@ -116,8 +120,8 @@ class DataManager:
             
             # Verify required columns
             if 'lat' not in df.columns or 'lon' not in df.columns:
-                logger.warning("Data missing lat/lon columns")
-                return pd.DataFrame(columns=['lat', 'lon', 'timestamp'])
+                logger.error("Data missing lat/lon columns")
+                return pd.DataFrame(columns=['lat', 'lon', 'timestamp', 'location'])
             
             df = df.sort_values(['lat', 'lon', 'timestamp'])
             logger.info(f"✓ Loaded {len(df)} data rows")
@@ -125,7 +129,7 @@ class DataManager:
             
         except Exception as e:
             logger.error(f"Failed to load data: {e}")
-            return pd.DataFrame(columns=['lat', 'lon', 'timestamp'])
+            return pd.DataFrame(columns=['lat', 'lon', 'timestamp', 'location'])
     
     def load_whitelist(self):
         """Load whitelist and augment with actual data locations"""
@@ -134,16 +138,19 @@ class DataManager:
             
             # Load original whitelist if exists
             if os.path.exists(Config.WHITELIST_PATH):
-                df = pd.read_csv(Config.WHITELIST_PATH)
-                for _, row in df.iterrows():
-                    whitelist[row['Place']] = {
-                        'region': row['Region'],
-                        'lat': row['Latitude'],
-                        'lon': row['Longitude'],
-                        'pin': row.get('PIN Code', ''),
-                        'area': row.get('Area/Locality', row['Place'])
-                    }
-                logger.info(f"✓ Loaded {len(whitelist)} locations from whitelist")
+                try:
+                    df = pd.read_csv(Config.WHITELIST_PATH)
+                    for _, row in df.iterrows():
+                        whitelist[row['Place']] = {
+                            'region': row['Region'],
+                            'lat': row['Latitude'],
+                            'lon': row['Longitude'],
+                            'pin': row.get('PIN Code', ''),
+                            'area': row.get('Area/Locality', row['Place'])
+                        }
+                    logger.info(f"✓ Loaded {len(whitelist)} locations from whitelist file")
+                except Exception as e:
+                    logger.warning(f"Could not load whitelist file: {e}")
             
             # Add locations from actual data
             if len(self.data) > 0 and 'location' in self.data.columns:
@@ -169,16 +176,7 @@ class DataManager:
                 logger.info(f"✓ Added {added} locations from actual data")
             
             if len(whitelist) == 0:
-                logger.warning("No locations loaded - using demo data")
-                whitelist = {
-                    'Connaught Place': {
-                        'region': 'Central Delhi',
-                        'lat': 28.6315,
-                        'lon': 77.2167,
-                        'pin': '110001',
-                        'area': 'Connaught Place'
-                    }
-                }
+                logger.error("⚠️ No locations loaded! Check data files.")
             
             return whitelist
             
@@ -212,132 +210,222 @@ class DataManager:
         location_data = self.data[location_mask].copy()
         
         if len(location_data) == 0:
-            logger.warning(f"No data found for {location_name}")
-            # Return empty dataframes
-            return pd.DataFrame(), pd.DataFrame()
+            raise ValueError(f"No data found for location: {location_name}")
         
-        # Get most recent data point
+        # Get most recent data as "current"
+        location_data = location_data.sort_values('timestamp')
         current = location_data.iloc[-1:].copy()
         
-        # Get historical data (last 7 days if available)
-        historical = location_data.iloc[-168:].copy() if len(location_data) > 1 else location_data.copy()
+        # Get historical data (last 30 days)
+        cutoff_date = current['timestamp'].iloc[0] - pd.Timedelta(days=30)
+        historical = location_data[location_data['timestamp'] >= cutoff_date].copy()
         
-        logger.info(f"Found {len(historical)} historical records")
+        logger.info(f"Found {len(historical)} historical records for {location_name}")
+        
         return current, historical
     
-    def load_model(self, pollutant, horizon):
-        """Load a specific model"""
-        key = f"{pollutant}_{horizon}"
-        if key not in self.models:
-            model_file = Config.MODEL_PATH / f"model_artifacts_{pollutant}_{horizon}.pkl"
-            if not model_file.exists():
-                logger.error(f"Model not found: {model_file}")
-                return None
-            
-            try:
-                with open(model_file, 'rb') as f:
-                    self.models[key] = pickle.load(f)
-                logger.info(f"✓ Loaded model: {key}")
-            except Exception as e:
-                logger.error(f"Failed to load model {key}: {e}")
-                return None
+    def load_model(self, pollutant: str):
+        """Load ML model for a specific pollutant"""
+        if pollutant in self.models:
+            return self.models[pollutant]
         
-        return self.models.get(key)
+        model_file = Config.MODEL_PATH / f"{pollutant}_random_forest_model.pkl"
+        
+        if not model_file.exists():
+            raise FileNotFoundError(f"Model not found: {model_file}")
+        
+        try:
+            with open(model_file, 'rb') as f:
+                self.models[pollutant] = pickle.load(f)
+            logger.info(f"✓ Loaded model: {pollutant}")
+            return self.models[pollutant]
+        except Exception as e:
+            logger.error(f"Failed to load model {pollutant}: {e}")
+            raise
 
-# Initialize data manager
+# Initialize global data manager
 data_manager = DataManager()
 
 # ============================================================================
-# PREDICTION FUNCTIONS
+# PREDICTION UTILITIES
 # ============================================================================
 
-def extract_weather_data(current_df):
-    """Extract real weather data from current dataframe"""
-    if len(current_df) == 0:
-        return {}
+class AQICalculator:
+    """AQI Calculator for Indian and US standards"""
     
-    row = current_df.iloc[0]
-    
-    weather = {
-        'temperature': float(row['temperature']) if pd.notna(row.get('temperature')) else None,
-        'humidity': float(row['humidity']) if pd.notna(row.get('humidity')) else None,
-        'wind_speed': float(row['windSpeed']) if pd.notna(row.get('windSpeed')) else None,
-        'wind_direction': float(row['windDirection']) if pd.notna(row.get('windDirection')) else None,
-        'pressure': float(row['pressure']) if pd.notna(row.get('pressure')) else None,
-        'precipitation': float(row['precipitation']) if pd.notna(row.get('precipitation')) else 0.0,
-        'timestamp': row['timestamp'].isoformat() if pd.notna(row.get('timestamp')) else None
+    # Indian AQI breakpoints
+    IN_BREAKPOINTS = {
+        'PM25': [(0, 30, 'Good'), (31, 60, 'Satisfactory'), (61, 90, 'Moderate'),
+                 (91, 120, 'Poor'), (121, 250, 'Very_Poor'), (251, 500, 'Severe')],
+        'PM10': [(0, 50, 'Good'), (51, 100, 'Satisfactory'), (101, 250, 'Moderate'),
+                 (251, 350, 'Poor'), (351, 430, 'Very_Poor'), (431, 500, 'Severe')],
+        'NO2': [(0, 40, 'Good'), (41, 80, 'Satisfactory'), (81, 180, 'Moderate'),
+                (181, 280, 'Poor'), (281, 400, 'Very_Poor'), (401, 500, 'Severe')],
+        'OZONE': [(0, 50, 'Good'), (51, 100, 'Satisfactory'), (101, 168, 'Moderate'),
+                  (169, 208, 'Poor'), (209, 748, 'Very_Poor'), (749, 1000, 'Severe')]
     }
     
-    return weather
-
-def predict_single(current_df, historical_df, pollutant, horizon, standard):
-    """Make prediction for a single pollutant and horizon"""
-    try:
-        model_data = data_manager.load_model(pollutant, horizon)
-        if model_data is None:
-            return None
+    # US AQI breakpoints
+    US_BREAKPOINTS = {
+        'PM25': [(0, 12, 'Good'), (12.1, 35.4, 'Moderate'), (35.5, 55.4, 'Unhealthy_for_Sensitive'),
+                 (55.5, 150.4, 'Unhealthy'), (150.5, 250.4, 'Very_Unhealthy'), (250.5, 500, 'Hazardous')],
+        'PM10': [(0, 54, 'Good'), (55, 154, 'Moderate'), (155, 254, 'Unhealthy_for_Sensitive'),
+                 (255, 354, 'Unhealthy'), (355, 424, 'Very_Unhealthy'), (425, 604, 'Hazardous')],
+        'NO2': [(0, 53, 'Good'), (54, 100, 'Moderate'), (101, 360, 'Unhealthy_for_Sensitive'),
+                (361, 649, 'Unhealthy'), (650, 1249, 'Very_Unhealthy'), (1250, 2049, 'Hazardous')],
+        'OZONE': [(0, 54, 'Good'), (55, 70, 'Moderate'), (71, 85, 'Unhealthy_for_Sensitive'),
+                  (86, 105, 'Unhealthy'), (106, 200, 'Very_Unhealthy'), (201, 604, 'Hazardous')]
+    }
+    
+    def get_category(self, value: float, pollutant: str, standard: str = 'IN'):
+        """Get AQI category for a pollutant value"""
+        breakpoints = self.IN_BREAKPOINTS if standard == 'IN' else self.US_BREAKPOINTS
         
-        model = model_data['model']
-        feature_cols = model_data['feature_columns']
+        if pollutant not in breakpoints:
+            return 'Unknown'
         
-        # Prepare features
-        X = current_df[feature_cols].copy()
+        for low, high, category in breakpoints[pollutant]:
+            if low <= value <= high:
+                return category
         
-        # Make prediction
-        pred_proba = model.predict_proba(X)[0]
-        predicted_class = model.classes_[np.argmax(pred_proba)]
-        confidence = float(np.max(pred_proba))
+        # If value exceeds all breakpoints
+        return breakpoints[pollutant][-1][2]
+    
+    def calculate_aqi_range(self, value: float, pollutant: str, standard: str = 'IN'):
+        """Calculate AQI range (min, max, mid) for a pollutant"""
+        breakpoints = self.IN_BREAKPOINTS if standard == 'IN' else self.US_BREAKPOINTS
         
-        # Get color
-        colors = Config.AQI_COLORS_IN if standard == "IN" else Config.AQI_COLORS_US
-        color = colors.get(predicted_class, '#CCCCCC')
+        if pollutant not in breakpoints:
+            return 0, 0, 0
+        
+        for low, high, _ in breakpoints[pollutant]:
+            if low <= value <= high:
+                aqi_low = low
+                aqi_high = high
+                aqi_mid = (low + high) / 2
+                return aqi_low, aqi_high, aqi_mid
+        
+        # Value exceeds breakpoints
+        last = breakpoints[pollutant][-1]
+        return last[0], last[1], (last[0] + last[1]) / 2
+    
+    def calculate_overall(self, predictions: Dict, standard: str = 'IN'):
+        """Calculate overall AQI from all pollutant predictions"""
+        max_aqi = 0
+        dominant_pollutant = 'None'
+        dominant_category = 'Good'
+        avg_confidence = 0
+        
+        for pollutant, (category, confidence) in predictions.items():
+            aqi_min, aqi_max, aqi_mid = self.calculate_aqi_range(aqi_mid, pollutant, standard)
+            
+            if aqi_max > max_aqi:
+                max_aqi = aqi_max
+                dominant_pollutant = pollutant
+                dominant_category = category
+            
+            avg_confidence += confidence
+        
+        avg_confidence = avg_confidence / len(predictions) if predictions else 0
+        
+        aqi_min, aqi_max, aqi_mid = 0, max_aqi, max_aqi / 2
         
         return {
-            'category': predicted_class,
-            'confidence': round(confidence * 100, 1),
-            'color': color,
-            'probabilities': {cls: round(float(prob) * 100, 1) 
-                            for cls, prob in zip(model.classes_, pred_proba)}
+            'aqi_min': round(aqi_min, 1),
+            'aqi_max': round(aqi_max, 1),
+            'aqi_mid': round(aqi_mid, 1),
+            'category': dominant_category,
+            'dominant_pollutant': dominant_pollutant,
+            'confidence': round(avg_confidence, 2)
         }
-        
-    except Exception as e:
-        logger.error(f"Prediction error for {pollutant}_{horizon}: {e}")
-        return None
 
-def predict_all(current_df, historical_df, standard="IN"):
-    """Make predictions for all pollutants and horizons"""
-    if len(current_df) == 0:
-        raise ValueError("No data available for prediction")
+aqi_calculator = AQICalculator()
+
+def extract_weather_data(current_data):
+    """Extract real weather data from current observation"""
+    if len(current_data) == 0:
+        return {}
     
-    pollutants = ['NO2', 'Ozone', 'PM10', 'PM25']
-    horizons = ['1h', '6h', '12h', '24h']
+    row = current_data.iloc[0]
     
-    results = {}
+    weather_data = {
+        'temperature': float(row.get('temp', 0)) if pd.notna(row.get('temp')) else None,
+        'humidity': float(row.get('humidity', 0)) if pd.notna(row.get('humidity')) else None,
+        'wind_speed': float(row.get('wind_speed', 0)) if pd.notna(row.get('wind_speed')) else None,
+        'wind_direction': float(row.get('wind_dir', 0)) if pd.notna(row.get('wind_dir')) else None,
+        'pressure': float(row.get('pressure', 0)) if pd.notna(row.get('pressure')) else None,
+        'precipitation': float(row.get('precip', 0)) if pd.notna(row.get('precip')) else None,
+        'visibility': float(row.get('vis', 0)) if pd.notna(row.get('vis')) else None,
+        'cloud_cover': float(row.get('clouds', 0)) if pd.notna(row.get('clouds')) else None
+    }
     
-    for pollutant in pollutants:
-        results[pollutant] = {}
-        for horizon in horizons:
-            pred = predict_single(current_df, historical_df, pollutant, horizon, standard)
-            if pred:
-                results[pollutant][horizon] = pred
-    
-    # Calculate overall AQI (use worst prediction)
-    all_categories = []
-    for pollutant_data in results.values():
-        for horizon_data in pollutant_data.values():
-            if horizon_data:
-                all_categories.append(horizon_data['category'])
-    
-    if all_categories:
-        severity_order = ['Good', 'Satisfactory', 'Moderate', 'Poor', 'Very_Poor', 'Severe']
-        worst_category = max(all_categories, key=lambda x: severity_order.index(x) if x in severity_order else 0)
-        colors = Config.AQI_COLORS_IN if standard == "IN" else Config.AQI_COLORS_US
+    return weather_data
+
+def predict_pollutant(pollutant: str, current_data, historical_data, horizon: str):
+    """Predict a single pollutant for a specific time horizon"""
+    try:
+        model = data_manager.load_model(pollutant)
         
-        results['overall'] = {
-            'category': worst_category,
-            'color': colors.get(worst_category, '#CCCCCC'),
-            'dominant_pollutant': 'PM2.5'  # Simplified
+        # Create features
+        features = current_data[['temp', 'humidity', 'wind_speed', 'wind_dir', 
+                                 'pressure', 'precip', 'vis', 'clouds']].copy()
+        
+        # Make prediction
+        prediction = model.predict(features)[0]
+        probabilities = model.predict_proba(features)[0]
+        confidence = float(max(probabilities))
+        
+        return {
+            'value': float(prediction),
+            'confidence': confidence,
+            'error': None
         }
+    
+    except Exception as e:
+        logger.error(f"Prediction error for {pollutant}: {e}")
+        return {'error': str(e)}
+
+def predict_all(current_data, historical_data, standard: str = 'IN'):
+    """Make predictions for all pollutants and time horizons"""
+    horizons = ['current', '6h', '24h']
+    pollutants = ['PM25', 'PM10', 'NO2', 'OZONE']
+    
+    results = {p: {} for p in pollutants}
+    results['overall'] = {}
+    
+    # Make predictions for each horizon
+    for horizon in horizons:
+        for pollutant in pollutants:
+            pred = predict_pollutant(pollutant, current_data, historical_data, horizon)
+            
+            if 'error' not in pred:
+                category = aqi_calculator.get_category(pred['value'], pollutant, standard)
+                aqi_min, aqi_max, aqi_mid = aqi_calculator.calculate_aqi_range(
+                    pred['value'], pollutant, standard
+                )
+                
+                results[pollutant][horizon] = {
+                    'value': round(pred['value'], 2),
+                    'category': category,
+                    'aqi_min': round(aqi_min, 1),
+                    'aqi_max': round(aqi_max, 1),
+                    'aqi_mid': round(aqi_mid, 1),
+                    'confidence': pred['confidence']
+                }
+            else:
+                results[pollutant][horizon] = pred
+        
+        # Calculate overall AQI
+        preds = {p: (results[p][horizon]['category'], results[p][horizon]['confidence'])
+                for p in pollutants if 'error' not in results[p][horizon]}
+        
+        if preds:
+            results['overall'][horizon] = aqi_calculator.calculate_overall(preds, standard)
+        else:
+            results['overall'][horizon] = {
+                'aqi_min': 0, 'aqi_max': 0, 'aqi_mid': 0,
+                'category': 'Unknown', 'dominant_pollutant': 'None', 'confidence': 0.0
+            }
     
     return results
 
@@ -363,13 +451,16 @@ class GeminiAssistant:
         if not self.enabled:
             return {
                 'response': self._static_response(context, user_profile),
-                'updated_profile': None
+                'updated_profile': None,
+                'source': 'static_fallback'
             }
         
         try:
+            # Extract user profile information
             profile_type = user_profile.get('profile_type', '')
             profile_label = user_profile.get('profile_label', 'general public')
             
+            # Build profile context
             profile_context = ""
             if profile_type:
                 profile_guidance = {
@@ -405,16 +496,20 @@ Provide your response:"""
             response = self.model.generate_content(prompt)
             return {
                 'response': response.text,
-                'updated_profile': None
+                'updated_profile': None,
+                'source': 'gemini_ai'
             }
         except Exception as e:
             logger.error(f"Gemini error: {e}")
             return {
                 'response': self._static_response(context, user_profile),
-                'updated_profile': None
+                'updated_profile': None,
+                'source': 'static_fallback',
+                'error': str(e)
             }
     
     def _static_response(self, context, user_profile=None):
+        """Fallback static response when AI unavailable"""
         category = context.get('aqi_data', {}).get('category', 'Unknown')
         
         base_responses = {
@@ -422,21 +517,22 @@ Provide your response:"""
             'Satisfactory': "😊 Air quality is acceptable for most people.",
             'Moderate': "⚠️ Moderate air quality. Sensitive individuals should be cautious.",
             'Poor': "🚨 Poor air quality. Limit outdoor activities.",
-            'Very_Poor': "⛔ Very poor air quality! Stay indoors.",
-            'Severe': "🔴 SEVERE air quality! Do not go outside."
+            'Very_Poor': "⛔ Very poor air quality! Stay indoors if possible.",
+            'Severe': "🔴 SEVERE air quality! Avoid going outside."
         }
         
         response = base_responses.get(category, "How can I help you with air quality information?")
         
+        # Add profile-specific advice
         if user_profile:
             profile_type = user_profile.get('profile_type', '')
             profile_advice = {
                 'child': " Children should avoid outdoor play during poor air quality.",
                 'elderly': " Elderly persons should take extra precautions and stay indoors.",
-                'pregnant': " Pregnant women should minimize outdoor exposure to protect the baby.",
-                'asthma': " Asthma patients should keep rescue inhalers ready and avoid triggers.",
+                'pregnant': " Pregnant women should minimize outdoor exposure.",
+                'asthma': " Asthma patients should keep rescue inhalers ready.",
                 'heart_condition': " Heart patients should avoid physical exertion outdoors.",
-                'respiratory': " Those with respiratory issues should use air purifiers indoors."
+                'respiratory': " Use air purifiers indoors if available."
             }
             
             if profile_type in profile_advice:
@@ -444,6 +540,7 @@ Provide your response:"""
         
         return response
 
+# Global instance
 gemini_assistant = GeminiAssistant()
 
 # ============================================================================
@@ -477,6 +574,7 @@ async def health_check():
     return {
         "status": "healthy",
         "data_loaded": len(data_manager.data) > 0,
+        "data_rows": len(data_manager.data),
         "locations": len(data_manager.whitelist),
         "regions": len(data_manager.get_regions()),
         "gemini_enabled": gemini_assistant.enabled,
@@ -485,35 +583,28 @@ async def health_check():
 
 @app.get("/api/regions")
 async def get_regions():
-    """Get all available regions"""
+    """Get all available regions - FIXED to return direct array"""
     try:
         regions = data_manager.get_regions()
-        return {
-            "success": True,
-            "regions": regions,
-            "count": len(regions)
-        }
+        logger.info(f"Returning {len(regions)} regions")
+        return regions  # Return direct array, not wrapped object
     except Exception as e:
         logger.error(f"Error getting regions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/locations/{region}")
 async def get_locations(region: str):
-    """Get locations for a specific region"""
+    """Get locations for a specific region - FIXED to return direct array"""
     try:
         locations = data_manager.get_locations_by_region(region)
-        return {
-            "success": True,
-            "region": region,
-            "locations": locations,
-            "count": len(locations)
-        }
+        logger.info(f"Returning {len(locations)} locations for region: {region}")
+        return locations  # Return direct array, not wrapped object
     except Exception as e:
         logger.error(f"Error getting locations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/predict")
-async def predict(request: PredictionRequest):
+async def predict_endpoint(request: PredictionRequest):
     """Get AQI predictions with real weather data for a location"""
     try:
         logger.info(f"Prediction request for: {request.location}")
@@ -523,7 +614,7 @@ async def predict(request: PredictionRequest):
             available_locations = list(data_manager.whitelist.keys())[:10]
             raise HTTPException(
                 status_code=404,
-                detail=f"Location '{request.location}' not found. Available locations: {available_locations}"
+                detail=f"Location '{request.location}' not found. Available: {available_locations}"
             )
         
         # Get location data
@@ -584,13 +675,14 @@ async def chat(request: ChatRequest):
 @app.on_event("startup")
 async def startup_event():
     """Log startup information"""
-    logger.info("=" * 50)
-    logger.info("AQI Dashboard API Starting...")
+    logger.info("=" * 60)
+    logger.info("AQI Dashboard API Starting on Railway...")
     logger.info(f"Data loaded: {len(data_manager.data)} rows")
     logger.info(f"Locations available: {len(data_manager.whitelist)}")
     logger.info(f"Regions available: {len(data_manager.get_regions())}")
-    logger.info(f"Gemini AI: {'Enabled' if gemini_assistant.enabled else 'Disabled'}")
-    logger.info("=" * 50)
+    logger.info(f"Gemini AI: {'✓ Enabled' if gemini_assistant.enabled else '✗ Disabled (Set GEMINI_API_KEY env variable)'}")
+    logger.info(f"Port: {os.environ.get('PORT', '8000')}")
+    logger.info("=" * 60)
 
 # ============================================================================
 # RUN SERVER
@@ -599,7 +691,7 @@ async def startup_event():
 if __name__ == "__main__":
     import uvicorn
     
-    # Get port from environment (Railway provides this)
+    # Railway automatically provides the PORT environment variable
     port = int(os.environ.get("PORT", 8000))
     
     # Run server
