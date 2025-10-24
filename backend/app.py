@@ -375,27 +375,30 @@ class AQICalculator:
 aqi_calculator = AQICalculator()
 
 def extract_weather_data(current_data):
-    """Extract real weather data from current observation"""
+    """Extract real weather data from current observation using actual column names"""
     if len(current_data) == 0:
         return {}
     
     row = current_data.iloc[0]
     
+    # Use actual column names from the data file
     weather_data = {
-        'temperature': float(row.get('temp', 0)) if pd.notna(row.get('temp')) else None,
+        'temperature': float(row.get('temperature', 0)) if pd.notna(row.get('temperature')) else None,
         'humidity': float(row.get('humidity', 0)) if pd.notna(row.get('humidity')) else None,
-        'wind_speed': float(row.get('wind_speed', 0)) if pd.notna(row.get('wind_speed')) else None,
-        'wind_direction': float(row.get('wind_dir', 0)) if pd.notna(row.get('wind_dir')) else None,
+        'wind_speed': float(row.get('windSpeed', 0)) if pd.notna(row.get('windSpeed')) else None,
+        'wind_direction': float(row.get('windBearing', 0)) if pd.notna(row.get('windBearing')) else None,
         'pressure': float(row.get('pressure', 0)) if pd.notna(row.get('pressure')) else None,
-        'precipitation': float(row.get('precip', 0)) if pd.notna(row.get('precip')) else None,
-        'visibility': float(row.get('vis', 0)) if pd.notna(row.get('vis')) else None,
-        'cloud_cover': float(row.get('clouds', 0)) if pd.notna(row.get('clouds')) else None
+        'precipitation': float(row.get('precipIntensity', 0)) if pd.notna(row.get('precipIntensity')) else None,
+        'surface_pressure': float(row.get('surfacePressure', 0)) if pd.notna(row.get('surfacePressure')) else None,
+        'cloud_cover': float(row.get('cloudCover', 0)) if pd.notna(row.get('cloudCover')) else None,
+        'apparent_temperature': float(row.get('apparentTemperature', 0)) if pd.notna(row.get('apparentTemperature')) else None,
+        'dew_point': float(row.get('dewPoint', 0)) if pd.notna(row.get('dewPoint')) else None
     }
     
     return weather_data
 
 def predict_pollutant(pollutant: str, current_data, historical_data, horizon: str):
-    """Predict a single pollutant for a specific time horizon"""
+    """Predict a single pollutant for a specific time horizon - FIXED COLUMN MAPPING"""
     try:
         # Map horizons to model file names
         horizon_map = {
@@ -407,17 +410,44 @@ def predict_pollutant(pollutant: str, current_data, historical_data, horizon: st
         model_horizon = horizon_map.get(horizon, '6h')
         model = data_manager.load_model(pollutant, model_horizon)
         
-        # Create features
-        feature_cols = ['temp', 'humidity', 'wind_speed', 'wind_dir', 
-                       'pressure', 'precip', 'vis', 'clouds']
+        # Create features DataFrame with proper column mapping
+        # Your data has camelCase columns, models expect snake_case
+        features = pd.DataFrame()
         
-        # Check if all required features exist
-        missing_cols = [col for col in feature_cols if col not in current_data.columns]
-        if missing_cols:
-            logger.warning(f"Missing features for {pollutant}: {missing_cols}")
-            return {'error': f"Missing features: {missing_cols}"}
+        # Map columns from your inference data to model expected names
+        column_map = {
+            'temperature': 'temp',
+            'humidity': 'humidity',  # Same name
+            'windSpeed': 'wind_speed',
+            'windBearing': 'wind_dir',
+            'pressure': 'pressure',  # Same name
+            'precipIntensity': 'precip',
+            'cloudCover': 'clouds'
+        }
         
-        features = current_data[feature_cols].copy()
+        # Apply mapping
+        for data_col, model_col in column_map.items():
+            if data_col in current_data.columns:
+                features[model_col] = current_data[data_col]
+            else:
+                # Column missing, fill with 0
+                features[model_col] = 0
+                logger.warning(f"Column '{data_col}' not found in data for {pollutant}, using 0")
+        
+        # Add 'vis' (visibility) - not in your data, use default
+        features['vis'] = 10.0  # Default visibility in km
+        
+        # Ensure all required features exist
+        required_features = ['temp', 'humidity', 'wind_speed', 'wind_dir', 
+                            'pressure', 'precip', 'vis', 'clouds']
+        
+        for col in required_features:
+            if col not in features.columns:
+                features[col] = 0
+                logger.warning(f"Feature '{col}' added with default value 0")
+        
+        # Select features in correct order
+        features = features[required_features]
         
         # Handle any NaN values
         features = features.fillna(0)
